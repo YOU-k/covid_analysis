@@ -284,44 +284,6 @@ pheatmap(tmp_a,cluster_cols = F,cluster_rows = F,
 
 library(alakazam)
 
-
-productive_clonotype_tbl <-
-  seutnk@meta.data %>%
-  filter(productive == "True") %>%
-  select(barcode, raw_clonotype_id) %>%
-  distinct() %>%
-  inner_join(
-    seutnk@meta.data[, c("Sample", "patient", "barcode","ids","condition","stage")],
-    by = c("barcode" = "barcode"))
-
-
-condition_curve <- estimateAbundance(
-  productive_clonotype_tbl,
-  group = "condition",
-  ci = 0.95,
-  nboot = 200,
-  clone = "raw_clonotype_id")
-p1 <- plot(condition_curve, colors=condition_color, silent = TRUE)
-
-p1
-
-#ggsave("vdj_tcells/test.pdf",width = 5,height = 5)
-ggsave("vdjplots/condition_abundance.pdf",width = 4,height = 3)
-
-
-condition_alpha_curve <- alphaDiversity(
-  condition_curve,
-  min_q = 0,
-  max_q = 4,
-  step_q = 0.1,
-  ci = 0.95,
-  nboot = 200)
-p2 <- plot(condition_alpha_curve, colors=condition_color, silent = TRUE)
-
-p2
-
-ggsave("vdjplots/condition_diversity.pdf",width = 4,height = 3)
-
 stage_curve <- estimateAbundance(
   productive_clonotype_tbl,
   group = "stage",
@@ -330,7 +292,6 @@ stage_curve <- estimateAbundance(
   clone = "raw_clonotype_id")
 p1 <- plot(stage_curve, colors=cond_palette, silent = TRUE)
 
-p1
 
 #ggsave("vdj_tcells/test.pdf",width = 5,height = 5)
 ggsave("vdjplots/stage_abundance.pdf",width = 4,height = 3)

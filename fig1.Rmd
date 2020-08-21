@@ -30,10 +30,9 @@ library(AnnotationHub)
 ah <- AnnotationHub()
 EnsDb.Hsapiens.v98 <- query(ah, c("EnsDb", "Homo Sapiens", 98))[[1]]
 rownames(sce) <- uniquifyFeatureNames(rowData(sce)$ID, rowData(sce)$Symbol)
-# Add chromosome location so we can filter on mitochondrial genes.
+
 location <- mapIds(
   x = EnsDb.Hsapiens.v98, 
-  # NOTE: Need to remove gene version number prior to lookup.
   keys = rowData(sce)$ID,
   keytype = "GENEID",
   column = "SEQNAME")
@@ -41,61 +40,8 @@ rowData(sce)$CHR <- location
 ```
 ```{r, results = "hide"}
 is_mito <- rowData(sce)$CHR == "MT"
-summary(is_mito)
 sce <- addPerCellQC(sce, subsets = list(Mt = which(is_mito)))
 ```
-
-
-## Visualizing the QC metrics
-
-The distributions of these metrics are shown in Figure \@ref(fig:qcplot-by-sample), stratified by sample
-
-```{r qcplot-by-sample, fig.cap = "Distributions of various QC metrics for all cells in the dataset. This includes the library sizes, number of expressed genes, and proportion of reads mapped to spike-in transcripts or mitochondrial genes.", layout = "l-body-outset", fig.asp = 0.7}
-as.factor(sce$Sample) ->sce$Sample
-multiplot(
-  plotColData(
-    object = sce, 
-    y = "sum",
-    x = "Sample",
-    colour_by = "Sample",
-    theme_size = 6) + 
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
-     scale_y_log10(),
-  plotColData(
-    object = sce,
-    y = "detected", 
-    x = "Sample",
-    colour_by = "Sample",
-    theme_size = 6) + 
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
-     scale_y_log10() ,
-  plotColData(
-    object = sce,
-    y = "subsets_Mt_percent", 
-    x = "Sample",
-    colour_by = "Sample",
-    theme_size = 6) + 
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
-    scale_y_log10() ,
-  cols = 2)
-```
-
-
-```{r qcbiplot, fig.cap = "Behaviour of each QC metric compared to the total number of expressed features. Each point represents a cell in the data set.", fig.width = 10, fig.asp = 0.5}
-par(mfrow = c(1, 2))
-plot(
-  x = sce$detected, 
-  y = sce$sum / 1e3,
-  xlab = "Number of expressed genes",
-  ylab = "Library size (thousands)")
-plot(
-  x = sce$detected, 
-  y = sce$subsets_Mt_percent,
-  xlab = "Number of expressed genes",
-  ylab = "Mitochondrial proportion (%)",
-  ylim = c(0, 100))
-```
-
 
 ```{r}
 libsize_drop <- isOutlier(
@@ -116,10 +62,6 @@ mito_drop <- isOutlier(
   nmads = 3, 
   type = "higher",
   batch = sce$batch)
-```
-
-```{r}
-sce_pre_QC_outlier_removal <- sce
 sce <- sce[, !(libsize_drop | feature_drop | mito_drop)]
 ```
 
@@ -172,7 +114,6 @@ dev.off()
 library(ggplot2)
 library(cowplot)
 sce$cluster <- seu$seurat_clusters
-
 ```
 
 
@@ -208,35 +149,18 @@ saveRDS(pred_cell_fine,file.path(work.p,"pred_cell_fine"))
 ```
 
 
-Annotating against the fine labels, we obtain the following cell type labels.
-
-```{r}
-tabyl(data.frame(label.fine = pred_cell_fine$labels), label.fine) %>%
-  adorn_pct_formatting(digits = 1) %>% 
-  dplyr::arrange(desc(n)) %>%
-  knitr::kable(
-    caption = "Cell label assignments using the fine labels of the reference data sets.")
-```
-
+Annotating against the fine labels.
 
 ```{r, eval = FALSE}
 library(SingleR)
-
 plotScoreDistribution(pred_cell_fine, labels = unique(pred_cell_fine$labels))
-tab <- table(Assigned = pred_cell_fine$pruned.labels, Cluster = sce$cluster)
 ```
-```{r}
-library(pheatmap)
-pdf("seurat_pheatmap_cluster_labels_fine.pdf",height = 7,width=8)
-pheatmap(log2(tab + 10), color = colorRampPalette(c("white", "blue"))(101))
-dev.off()
-```
-
 
 #find marker genes
 ```{r}
 FindAllMarkers(seu, only.pos = TRUE) -> seu.markers
 ```
+
 ```{r}
 saveRDS(seu.markers,"seu.markers.rds")
 write_tsv(seu.markers,"seu_markers.tsv")
