@@ -1,0 +1,443 @@
+```{r,warning=FALSE,message=FALSE}
+library(SingleCellExperiment)
+library(here)
+library(rmarkdown)
+library(janitor)
+library(BiocStyle)
+library(ggplot2)
+library(cowplot)
+library(scater)
+library(scran)
+library(DropletUtils)
+```
+
+
+# set up the data
+
+```{r} 
+setwd("/stornext/General/data/user_managed/grpu_mritchie_1/Yue")
+sample_list = paste0("COVID19_MjM/analysis/cr_output/",2:21,"/filtered_feature_bc_matrix")
+
+sce = read10xCounts(sample_list,sample.names = 2:21)
+```
+
+
+# incorporate gene-level annotation
+
+```{r}
+library(scater)
+library(AnnotationHub)
+ah <- AnnotationHub()
+EnsDb.Hsapiens.v98 <- query(ah, c("EnsDb", "Homo Sapiens", 98))[[1]]
+rownames(sce) <- uniquifyFeatureNames(rowData(sce)$ID, rowData(sce)$Symbol)
+# Add chromosome location so we can filter on mitochondrial genes.
+location <- mapIds(
+  x = EnsDb.Hsapiens.v98, 
+  # NOTE: Need to remove gene version number prior to lookup.
+  keys = rowData(sce)$ID,
+  keytype = "GENEID",
+  column = "SEQNAME")
+rowData(sce)$CHR <- location
+```
+```{r, results = "hide"}
+is_mito <- rowData(sce)$CHR == "MT"
+summary(is_mito)
+sce <- addPerCellQC(sce, subsets = list(Mt = which(is_mito)))
+```
+
+
+## Visualizing the QC metrics
+
+The distributions of these metrics are shown in Figure \@ref(fig:qcplot-by-sample), stratified by sample
+
+```{r qcplot-by-sample, fig.cap = "Distributions of various QC metrics for all cells in the dataset. This includes the library sizes, number of expressed genes, and proportion of reads mapped to spike-in transcripts or mitochondrial genes.", layout = "l-body-outset", fig.asp = 0.7}
+as.factor(sce$Sample) ->sce$Sample
+multiplot(
+  plotColData(
+    object = sce, 
+    y = "sum",
+    x = "Sample",
+    colour_by = "Sample",
+    theme_size = 6) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+     scale_y_log10(),
+  plotColData(
+    object = sce,
+    y = "detected", 
+    x = "Sample",
+    colour_by = "Sample",
+    theme_size = 6) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+     scale_y_log10() ,
+  plotColData(
+    object = sce,
+    y = "subsets_Mt_percent", 
+    x = "Sample",
+    colour_by = "Sample",
+    theme_size = 6) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+    scale_y_log10() ,
+  cols = 2)
+```
+
+
+```{r qcbiplot, fig.cap = "Behaviour of each QC metric compared to the total number of expressed features. Each point represents a cell in the data set.", fig.width = 10, fig.asp = 0.5}
+par(mfrow = c(1, 2))
+plot(
+  x = sce$detected, 
+  y = sce$sum / 1e3,
+  xlab = "Number of expressed genes",
+  ylab = "Library size (thousands)")
+plot(
+  x = sce$detected, 
+  y = sce$subsets_Mt_percent,
+  xlab = "Number of expressed genes",
+  ylab = "Mitochondrial proportion (%)",
+  ylim = c(0, 100))
+```
+
+
+```{r}
+libsize_drop <- isOutlier(
+  metric = sce$sum, 
+  nmads = 3,
+  type = "lower", 
+  log = TRUE,
+  batch = sce$batch)
+
+feature_drop <- isOutlier(
+  metric = sce$detected,
+  nmads = 3, 
+  type = "lower", 
+  log = TRUE,
+  batch = sce$batch)
+mito_drop <- isOutlier(
+  metric = sce$subsets_Mt_percent, 
+  nmads = 3, 
+  type = "higher",
+  batch = sce$batch)
+```
+
+```{r}
+sce_pre_QC_outlier_removal <- sce
+sce <- sce[, !(libsize_drop | feature_drop | mito_drop)]
+```
+
+
+# use seurat normalize and draw plots
+```{r}
+library(Seurat)
+library(SeuratData)
+library(SeuratWrappers)
+#remove a low quality sample
+sce <- sce[,!sce$Sample=="5"]
+CreateSeuratObject(counts=counts(sce)) -> seu
+work.p <- "/stornext/General/data/user_managed/grpu_mritchie_1/Yue/COVID19_MjM/result"
+```
+
+#normalization
+```{r}
+seu@meta.data <- as.data.frame(colData(sce))
+seu <- NormalizeData(seu)
+seu <- FindVariableFeatures(seu,nfeatures = 2000)
+top10 <- head(VariableFeatures(seu), 10)
+plot1 <- VariableFeaturePlot(seu)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+```
+
+#run fastMNN to integrate
+```{r}
+seu <- RunFastMNN(object.list = SplitObject(seu, split.by = "Sample"),features = 2000)
+```
+
+#clustering 
+```{r}
+seu <- RunUMAP(seu, reduction = "mnn", dims = 1:30)
+seu <- FindNeighbors(seu, reduction = "mnn", dims = 1:30)
+seu <- FindClusters(seu)
+saveRDS(seu,"seu.rds")
+```
+```{r}
+pdf("seurat_umap_new.pdf")
+
+VlnPlot(seu, features = c("nFeature_RNA"))
+DimPlot(seu, group.by = "ident",label = TRUE)
+dev.off()
+```
+
+
+#here, mega cell would let marker genes contain many 
+```{r}
+library(ggplot2)
+library(cowplot)
+sce$cluster <- seu$seurat_clusters
+
+```
+
+
+# SingleR
+
+```{r, echo=FALSE, message=FALSE}
+library(SingleR)
+mi <- MonacoImmuneData()
+```
+
+```{r}
+ref <- list( MI = mi)
+```
+
+### Fine label
+
+```{r}
+labels_fine <- split(
+  paste0(
+    rep(names(ref), sapply(ref, ncol)),
+    ".",
+    unlist(lapply(ref, function(x) x$label.fine), use.names = FALSE)),
+  factor(rep(names(ref), sapply(ref, ncol)), names(ref)))
+pred_cell_fine <- SingleR(
+  test = sce,
+  ref = ref,
+  labels = labels_fine)
+```
+
+```{r}
+names(metadata(pred_cell_fine)$de.genes) <- unique(unlist(labels_fine))
+saveRDS(pred_cell_fine,file.path(work.p,"pred_cell_fine"))
+```
+
+
+Annotating against the fine labels, we obtain the following cell type labels.
+
+```{r}
+tabyl(data.frame(label.fine = pred_cell_fine$labels), label.fine) %>%
+  adorn_pct_formatting(digits = 1) %>% 
+  dplyr::arrange(desc(n)) %>%
+  knitr::kable(
+    caption = "Cell label assignments using the fine labels of the reference data sets.")
+```
+
+
+```{r, eval = FALSE}
+library(SingleR)
+
+plotScoreDistribution(pred_cell_fine, labels = unique(pred_cell_fine$labels))
+tab <- table(Assigned = pred_cell_fine$pruned.labels, Cluster = sce$cluster)
+```
+```{r}
+library(pheatmap)
+pdf("seurat_pheatmap_cluster_labels_fine.pdf",height = 7,width=8)
+pheatmap(log2(tab + 10), color = colorRampPalette(c("white", "blue"))(101))
+dev.off()
+```
+
+
+#find marker genes
+```{r}
+FindAllMarkers(seu, only.pos = TRUE) -> seu.markers
+```
+```{r}
+saveRDS(seu.markers,"seu.markers.rds")
+write_tsv(seu.markers,"seu_markers.tsv")
+```
+```{r}
+library(tidyverse)
+all.genes <- rownames(seu)
+seu <- ScaleData(seu, features = all.genes)
+
+top10 <- seu.markers %>% group_by(cluster) %>% top_n(n = 20, wt = -p_val_adj) %>% top_n(n = 5, wt = avg_logFC)
+top10[!duplicated(top10$gene),]->top10
+```
+
+```{r}
+pdf("dotplot.markers.pdf",height = 16,width = 10)
+DotPlot(seu,features = top10$gene,cols="Spectral",cluster.idents = TRUE) + coord_flip()
+dev.off()
+```
+```{r}
+for (chosen in levels(seu$seurat_clusters)){
+  seu.markers$gene[seu.markers$cluster==chosen] -> features
+  if (length(features)>200){features=features[1:200]}
+  pdf(paste0("marker_genes/",chosen,"-dotplot.markers.pdf"),height = 25,width = 10)
+  p<- DotPlot(seu,features = features,cols="Spectral",cluster.idents = TRUE) + coord_flip()
+  print(p)
+  dev.off()
+}
+```
+
+```{r}
+for (chosen in levels(seu$seurat_clusters)){
+  seu.markers$gene[seu.markers$cluster==chosen][1:10] -> features
+  png(paste0("umaps/",chosen,"-feature_umaps.png"),width = 10, height = 8,units="in",res=600)
+  p<- FeaturePlot(seu, features = features)
+  print(p)
+  dev.off()
+}
+```
+
+
+#figure 1 plots
+## assigned cell types
+```{r}
+seu2<- seu[,!seu$seurat_clusters %in% c(16,19,21,23,24)]
+seu2$cell_type <- " "
+seu2$cell_type[seu2$seurat_clusters=="0"] <- "Naive CD4+ T"
+seu2$cell_type[seu2$seurat_clusters=="2"] <- "Activated CD4+ T"
+seu2$cell_type[seu2$seurat_clusters=="1"|seu2$seurat_clusters=="4"] <- "Effector T"
+seu2$cell_type[seu2$seurat_clusters=="3"|seu2$seurat_clusters=="11"] <- "NK"
+seu2$cell_type[seu2$seurat_clusters=="5"] <- "Naive CD8+ T"
+seu2$cell_type[seu2$seurat_clusters=="6"|seu2$seurat_clusters=="10"] <- "B"
+seu2$cell_type[seu2$seurat_clusters=="7"] <- "Innate T"
+seu2$cell_type[seu2$seurat_clusters=="8"|seu2$seurat_clusters=="13"] <- "Monocytes"
+seu2$cell_type[seu2$seurat_clusters=="9"] <- "Memory CD8+ T"
+seu2$cell_type[seu2$seurat_clusters=="12"] <- "Platelet"
+seu2$cell_type[seu2$seurat_clusters=="14"] <- "Proliferative T/NK"
+seu2$cell_type[seu2$seurat_clusters=="15"] <- "DC"
+seu2$cell_type[seu2$seurat_clusters=="17"] <- "Plasma B"
+seu2$cell_type[seu2$seurat_clusters=="18"] <- "Erythroid"
+seu2$cell_type[seu2$seurat_clusters=="20"] <- "Progenitor"
+seu2$cell_type[seu2$seurat_clusters=="22"] <- "NK"
+
+
+```
+
+
+```{r}
+n <- length(unique(seu2$cell_type))
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+pie(rep(1,n), col=sample(col_vector, n))
+
+celltype_color <- col_vector[1:15]
+celltype_color[6] <- "#F768A1"
+celltype_color[4] <- "#9ECAE1"
+celltype_color[16] <-"#E31A1C"
+names(celltype_color) <- c("Naive CD4+ T","Effector T","Activated CD4+ T","Innate T","B","NK","Naive CD8+ T","Memory CD8+ T","DC","Plasma B","Monocytes","Proliferative T/NK","Platelet","Progenitor","Erythroid")
+celltype_color <- celltype_color[1:16]
+saveRDS(celltype_color,"celltype_color.rds")
+```
+
+## UMAPs
+```{r}
+Idents(seu2) <-seu2$cell_type
+UMAPPlot(seu2,cols=celltype_color) +theme(axis.ticks = element_blank(),axis.text = element_blank(),legend.position = "none")
+ggsave("fig1/umap2.pdf",width = 6,heigh=6)
+```
+
+
+```{r}
+Idents(seu) <- seu$cell_type
+UMAPPlot(seu[,seu$condition=="Health control"],cols=celltype_color) +theme(axis.ticks = element_blank(),axis.text = element_blank(),legend.position = "none")
+ggsave("supfigs/umap_health.png",width=8,height = 8)
+UMAPPlot(seu[,seu$condition=="Asymptomatic"],cols=celltype_color) +theme(axis.ticks = element_blank(),axis.text = element_blank(),legend.position = "none")
+ggsave("supfigs/umap_as.png",width=8,height = 8)
+UMAPPlot(seu[,seu$condition=="Moderate"],cols=celltype_color) +theme(axis.ticks = element_blank(),axis.text = element_blank(),legend.position = "none")
+ggsave("supfigs/umap_mode.png",width=8,height = 8)
+UMAPPlot(seu[,seu$condition=="Severe"],cols=celltype_color) +theme(axis.ticks = element_blank(),axis.text = element_blank(),legend.position = "none")
+ggsave("supfigs/umap_se.png",width=8,height = 8)
+```
+```{r}
+seu@meta.data -> meta
+meta <- meta[!meta$patient %in% c("0/1","1/0"),]
+meta$id <- paste0(meta$patient,"_",meta$days)
+meta %>% group_by(id) %>% summarise(n=n()) -> tmp
+tmp %>% full_join(unique(meta[,c("id","condition")]),by=c("id"="id")) ->tmp
+tmp$n <- log10(tmp$n)
+#tmp$condition <- factor(tmp$condition,levels = c("Health control","Asymptomatic","Moderate","Severe"))
+
+c("B_-1", "B_-3", "B_2","C_12", "C_28","I_-1", "I_2","I_5","K_0",  "L_0","M_0") ->a
+tmp$id <- factor(tmp$id,levels = c("I_-1", "I_2","I_5",tmp$id[!tmp$id %in% a],"B_-1", "B_-3", "B_2","C_12", "C_28","K_0",  "L_0","M_0"))
+```
+```{r}
+ggplot(tmp) + 
+    geom_col(
+      aes(x = id, y = n,fill=condition)) +
+    coord_flip()  +
+    ylab("Frequency") +
+    scale_fill_manual(values = condition_color) +
+    theme_cowplot(font_size = 15)+labs(fill="",y="log10(Cell number)",x="")
+ggsave("fig1/bar_cellnum.pdf",width=5,height=6)
+```
+
+## barplot
+```{r}
+seu@meta.data -> meta
+meta <- meta[!meta$patient %in% c("0/1","1/0"),]
+
+meta %>% group_by(patient) %>% summarise(n=n()) -> tmp
+tmp %>% full_join(unique(meta[,c("patient","condition")]),by=c("patient"="patient")) ->tmp
+tmp$n <- log10(tmp$n)
+#tmp$condition <- factor(tmp$condition,levels = c("Health control","Asymptomatic","Moderate","Severe"))
+
+c("B", "C","I","K",  "L","M") ->a
+tmp$patient <- factor(tmp$patient,levels = c("I",tmp$patient[!tmp$patient %in% a],"B","C","K",  "L","M"))
+```
+```{r}
+ggplot(tmp) + 
+    geom_col(
+      aes(x = patient, y = n,fill=condition),width = 0.8) +
+    coord_flip()  +
+    ylab("Frequency") +
+    scale_fill_manual(values = condition_color) +
+    theme_cowplot(font_size = 15)+labs(fill="",y="log10(Cell number)",x="")
+ggsave("fig1/bar_cellnum2.pdf",width=5,height=6)
+```
+
+
+```{r}
+seu2@meta.data[!seu2$patient %in% c("1/0","0/1"),] -> meta1
+meta1$cell_type <- factor(meta1$cell_type,levels=c("Memory CD8+ T","Naive CD4+ T","Naive CD8+ T","Innate T","Activated CD4+ T","Effector T","Proliferative T/NK","NK","Progenitor","B","Plasma B","Monocytes","Platelet","DC","Erythroid"))
+```
+
+```{r}
+meta1$condition <- factor(meta1$condition,levels=c("HC","Asymptomatic","Moderate","Severe"))
+  ggplot(meta1) + 
+    geom_bar(
+      aes(x = condition, fill = cell_type),
+      position = position_fill(reverse = TRUE)) +
+    #coord_flip() +
+    ylab("Frequency") +
+    scale_fill_manual(values = celltype_color) +
+    theme_cowplot(font_size = 15)+labs(fill="") +theme(axis.text.x = element_text(hjust = 1,angle = 30))
+ggsave("fig1/condition_days.pdf",width=3,height=6)
+```
+
+```{r}
+meta1$id <- paste0(meta1$patient,"(",meta1$days,")")
+  ggplot(meta1) + 
+    geom_bar(
+      aes(x = id, fill = cell_type),
+      position = position_fill(reverse = TRUE)) +
+    
+    ylab("Frequency") +
+    scale_fill_manual(values = celltype_color) +
+    theme_cowplot(font_size =15)+
+    theme(axis.title.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+    labs(fill="")
+  ggsave("fig1/patient_days.pdf",width=20,height=8)
+```
+
+
+## select features to draw dotplot and umap
+```{r}
+features_all <- c("CCR7","CD4","CD8A","CD3E","GZMH","IL7R","KIT","KLRF1","NKG7","TRGV9","LYZ","FCN1","MKI67","MZB1","CD79A","FCER1A","ALAS2","CD34","PPBP")
+```
+
+```{r}
+Idents(seu2) <- seu2$cell_type
+DotPlot(seu2,features = features_all,cols="Spectral",cluster.idents=TRUE) +theme(axis.text.x = element_text(hjust = 1,angle = 60)) +coord_flip()
+ggsave("fig1/markers3.pdf",width=7,heigh=7)
+```
+
+```{r}
+featuresumap <- c("CCR7","GZMH","MKI67","TRGV9","KLRF1","CD79A","LYZ","CD8A","FCGR3A")
+```
+
+```{r}
+FeaturePlot(seu2,featuresumap,ncol = 3) 
+ggsave("fig1/features_umap.png",width=8,height = 8)
+```
+
+
