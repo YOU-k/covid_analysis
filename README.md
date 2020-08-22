@@ -1,2 +1,1 @@
-# covid_analysis
-Contains scripts used to analyze scRNA and VDJ data sets of covid19 patients
+Contains scripts used to analyze scRNA and VDJ dataset in paper "Longitudinal single cell immune profiling revealed distinct innate immune response in asymptomatic COVID-19 patients"。
